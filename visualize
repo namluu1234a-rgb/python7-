@@ -1,0 +1,218 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+import os
+from scipy.stats import pearsonr
+
+# ===========================
+# 1. 全局画风设置 (学术级审美)
+# ===========================
+# 使用 Seaborn 的高级风格
+sns.set_style("whitegrid")
+# 字体设置 (Windows自带黑体，解决中文乱码)
+plt.rcParams['font.sans-serif'] = ['SimHei']
+plt.rcParams['axes.unicode_minus'] = False
+# 高清分辨率 (论文/PPT专用)
+plt.rcParams['figure.dpi'] = 300
+
+DATA_DIR = "./real_data"
+
+# 你的案例清单
+STOCKS = {
+    '601127': {'name': '赛力斯', 'tag': '价值共振 (Pos)'},
+    '01810': {'name': '小米集团', 'tag': '领袖驱动 (Pos)'},
+    '002242': {'name': '九阳股份', 'tag': '噪音干扰 (Neg)'}
+}
+
+
+def load_data():
+    """读取所有股票的最终数据"""
+    data = {}
+    corrs = []
+
+    for code, info in STOCKS.items():
+        path = f"{DATA_DIR}/final_{code}.csv"
+        if os.path.exists(path):
+            df = pd.read_csv(path, index_col=0, parse_dates=True)
+
+            # 计算相关性
+            if len(df) > 5:
+                r, _ = pearsonr(df['meme_heat'], df['CAR'])
+                data[code] = df
+                corrs.append({
+                    'name': info['name'],
+                    'r': r,
+                    'type': 'positive' if r > 0.5 else 'negative',
+                    'code': code
+                })
+    return data, pd.DataFrame(corrs)
+
+
+# ===========================
+# 图表 1: 发散型条形图 (Diverging Bars)
+# 用于：PPT 总结页，直观对比谁有效、谁无效
+# ===========================
+def plot_diverging_bars(corr_df):
+    print("🎨 [Chart 1] 正在绘制结论对比图 (Diverging Bars)...")
+
+    if corr_df.empty: return
+
+    # 排序
+    df = corr_df.sort_values('r')
+
+    plt.figure(figsize=(10, 5))
+
+    # 颜色映射：正相关绿色(有效)，负相关/弱相关红色(无效)
+    # A股习惯：红色涨(好)，绿色跌(坏)。但在学术相关性图里，通常绿色代表正向支撑，红色代表背离
+    # 这里我们用：红色=正相关(A股红)，绿色=负相关
+    colors = ['#d62728' if x > 0 else '#2ca02c' for x in df['r']]
+
+    plt.hlines(y=df['name'], xmin=0, xmax=df['r'], color=colors, alpha=0.8, linewidth=12)
+
+    # 添加数值标签
+    for x, y, tex in zip(df['r'], df['name'], df['r']):
+        t_color = '#d62728' if x > 0 else '#2ca02c'
+        align = 'left' if x > 0 else 'right'
+        plt.text(x, y, f" {round(tex, 3)} ", horizontalalignment=align,
+                 verticalalignment='center', fontdict={'color': t_color, 'size': 12, 'weight': 'bold'})
+
+    plt.title('实证结果：舆情因子对股价的解释力对比 (Pearson R)', fontdict={'size': 14, 'weight': 'bold'})
+    plt.grid(linestyle='--', alpha=0.5, axis='x')
+    plt.xlim(-1.2, 1.2)
+    plt.xlabel('相关系数 (Correlation Coefficient)', fontsize=10)
+
+    # 添加区域注释
+    plt.annotate('无效/噪音区', xy=(-0.5, 0), xytext=(-0.8, 2),
+                 fontsize=10, color='green', alpha=0.7)
+    plt.annotate('有效/共振区', xy=(0.5, 0), xytext=(0.5, 2),
+                 fontsize=10, color='red', alpha=0.7)
+
+    plt.tight_layout()
+    plt.savefig(f"{DATA_DIR}/1_Conclusion_Diverging_Bars.png")
+    print("   ✅ 已保存: 1_Conclusion_Diverging_Bars.png")
+
+
+# ===========================
+# 图表 2: 带边缘分布的回归图 (Joint Plot)
+# 用于：学术实证，证明变量间的统计关系
+# ===========================
+def plot_joint_regression(df, name):
+    print(f"🎨 [Chart 2] 正在绘制回归检验图 ({name})...")
+
+    # 设置颜色主题
+    color = '#d62728' if name != '九阳股份' else '#7f8c8d'
+
+    # 绘制联合图
+    g = sns.jointplot(
+        x='meme_heat',
+        y='CAR',
+        data=df,
+        kind='reg',  # 关键：带回归线
+        truncate=False,
+        color=color,
+        height=7,
+        scatter_kws={'alpha': 0.5, 's': 30},
+        line_kws={'lw': 2}
+    )
+
+    # 优化标签
+    g.set_axis_labels('舆情累积关注度 (Cumulative Attention)', '股价累计超额收益 (CAR)', fontsize=10)
+    g.fig.suptitle(f'<{name}> 因子有效性实证检验 (Regression Fit)', fontsize=14, y=1.02)
+
+    plt.savefig(f"{DATA_DIR}/2_Regression_{name}.png", bbox_inches='tight')
+    print(f"   ✅ 已保存: 2_Regression_{name}.png")
+
+
+# ===========================
+# 图表 3: 双轴面积图 (Dual-Axis Area)
+# 用于：展示“时空伴随”现象，最直观的趋势图
+# ===========================
+def plot_dual_axis(df, name):
+    print(f"🎨 [Chart 3] 正在绘制时空伴随图 ({name})...")
+
+    fig, ax1 = plt.subplots(figsize=(12, 5))
+
+    # 轴1：舆情 (面积图)
+    color1 = '#ff7f0e'  # 橙色
+    ax1.set_xlabel('交易日期', fontsize=10)
+    ax1.set_ylabel('舆情热度累积', color=color1, fontsize=10)
+    # 填充面积
+    ax1.fill_between(df.index, df['meme_heat'], color=color1, alpha=0.2)
+    ax1.plot(df.index, df['meme_heat'], color=color1, alpha=0.6, linewidth=1, label='舆情热度')
+    ax1.tick_params(axis='y', labelcolor=color1)
+
+    # 轴2：股价 (实线)
+    ax2 = ax1.twinx()
+    color2 = '#1f77b4'  # 蓝色
+    ax2.set_ylabel('股价超额收益 (CAR)', color=color2, fontsize=10)
+    ax2.plot(df.index, df['CAR'], color=color2, linewidth=2.5, label='股价CAR')
+    ax2.tick_params(axis='y', labelcolor=color2)
+
+    # 标题
+    plt.title(f'<{name}>: 舆情发酵与资金行为的时空伴随分析', fontsize=14, fontweight='bold')
+    plt.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    plt.savefig(f"{DATA_DIR}/3_DualAxis_{name}.png")
+    print(f"   ✅ 已保存: 3_DualAxis_{name}.png")
+
+
+# ===========================
+# 图表 4: 小提琴图 (Violin Plot)
+# 用于：微观审计，分析情绪的波动率和分布特征
+# ===========================
+def plot_violin(data_dict):
+    print("🎨 [Chart 4] 正在绘制情绪分布图 (Violin)...")
+
+    # 构造合并数据
+    combined = []
+    for code, df in data_dict.items():
+        temp = pd.DataFrame({
+            'Stock': STOCKS[code]['name'],
+            'Buzz': df['total_buzz']  # 用每日原始热度
+        })
+        combined.append(temp)
+
+    if not combined: return
+    df_all = pd.concat(combined)
+
+    plt.figure(figsize=(10, 6))
+    # 绘图
+    sns.violinplot(x='Stock', y='Buzz', data=df_all, palette="Set2", inner="box", linewidth=1.5)
+
+    plt.title('不同案例的舆情爆发力分布对比 (Violin Plot)', fontsize=14)
+    plt.ylabel('单日讨论热度 (Daily Buzz)', fontsize=10)
+    plt.xlabel('标的资产', fontsize=10)
+
+    plt.tight_layout()
+    plt.savefig(f"{DATA_DIR}/4_Violin_Distribution.png")
+    print("   ✅ 已保存: 4_Violin_Distribution.png")
+
+
+# ===========================
+# 主程序入口
+# ===========================
+if __name__ == "__main__":
+    # 1. 加载数据
+    data_dict, corr_df = load_data()
+
+    if not data_dict:
+        print("❌ 没有找到数据，请先运行 processing.py 生成 final_xxxx.csv")
+    else:
+        # 2. 绘制结论图 (对比)
+        plot_diverging_bars(corr_df)
+
+        # 3. 绘制赛力斯 (作为正面典型：价值共振)
+        if '601127' in data_dict:
+            plot_joint_regression(data_dict['601127'], '赛力斯')
+            plot_dual_axis(data_dict['601127'], '赛力斯')
+
+        # 4. 绘制九阳 (作为反面典型：噪音干扰)
+        if '002242' in data_dict:
+            plot_dual_axis(data_dict['002242'], '九阳股份')
+
+        # 5. 绘制分布对比
+        plot_violin(data_dict)
+
+        print("\n🎉 全部高清图表已生成！请打开 real_data 文件夹查看。")
