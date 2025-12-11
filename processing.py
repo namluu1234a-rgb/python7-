@@ -17,7 +17,7 @@ STOCKS = {
 
 
 def process_final():
-    print("🚀 启动数据清洗与全景整合引擎...")
+    print("🚀 启动数据清洗与全景整合引擎 (修复版)...")
 
     all_data_list = []
 
@@ -42,23 +42,24 @@ def process_final():
         df = pd.merge(df_m, df_s, left_index=True, right_index=True, how='inner')
         if len(df) < 5: continue
 
-        # 3. 统一因子计算 (为了在同一张图上比较，必须用统一的归一化标准)
+        # 3. 统一因子计算
         if code in ['601127', '603178']:
-            # 热门股用热度
+            # 热门股用热度累积
             raw = df['total_buzz'].cumsum()
         else:
-            # 甚至九阳这种，我们也用累积热度，看它怎么“空转”
-            # 为了让九阳的泡泡在图上显示得合理，做一点数值调整
+            # 九阳也用热度累积，放大一点数值以便观察
             raw = df['total_buzz'].cumsum() * 2
 
         df['cum_factor'] = raw.bfill().fillna(0)
 
-        # 4. 关键：计算“背离度” (Divergence)
-        # 背离度 = 舆情热度(排名) - 股价收益(排名)
-        # 如果热度很高但股价不涨，背离度就很大 -> 风险！
+        # 【关键修复】APP 需要读取 'meme_heat' 列，这里必须赋值
+        df['meme_heat'] = df['cum_factor']
+
+        # 4. 计算其他展示指标
+        # 背离度
         df['divergence'] = df['cum_factor'] / (df['CAR'].abs() + 0.01)
 
-        # 归一化 (0-100分制)
+        # 归一化 (0-100分制，用于动态气泡图)
         df['Heat_Score'] = (df['cum_factor'] - df['cum_factor'].min()) / (
                     df['cum_factor'].max() - df['cum_factor'].min()) * 100
         df['CAR_Score'] = df['CAR'] * 100
@@ -66,35 +67,33 @@ def process_final():
         # 保存单文件
         df.to_csv(f"{DATA_DIR}/final_{code}.csv")
 
-        # 5. 准备合并数据
-        # 添加标签列
+        # 5. 准备合并数据 (用于动态图)
         df['Name'] = name
         df['Type'] = info['type']
-        df['Date_Str'] = df.index.strftime('%Y-%m-%d')  # 动画帧需要字符串格式
+        df['Date_Str'] = df.index.strftime('%Y-%m-%d')
 
-        # 重置索引，保留日期列
         df_reset = df.reset_index()
+        # 确保包含 app 需要的所有列
         all_data_list.append(
-            df_reset[['date', 'Date_Str', 'Name', 'Type', 'Heat_Score', 'CAR_Score', 'total_buzz', 'divergence']])
+            df_reset[['date', 'Date_Str', 'Name', 'Type', 'Heat_Score', 'CAR_Score', 'total_buzz', 'meme_heat', 'CAR']])
 
-        # 6. 生成词云 (保持不变)
+        # 6. 生成词云
         wc = WordCloud(font_path="C:/Windows/Fonts/simhei.ttf", background_color="white", width=600, height=400)
         if code == '601127':
-            words = {'遥遥领先': 100, '华为': 90, 'M7': 80}
+            words = {'遥遥领先': 100, '华为': 90, 'M7': 80, '大定': 60}
         elif code == '603178':
-            words = {'龙字辈': 100, '涨停': 90, '圣龙': 80}
+            words = {'龙字辈': 100, '涨停': 90, '圣龙': 80, '跨年妖': 70}
         else:
-            words = {'哈基米': 100, '离谱': 50, '甚至': 40}
+            words = {'哈基米': 100, '离谱': 50, '甚至': 40, '好玩': 30}
         wc.generate_from_frequencies(words)
         wc.to_file(f"{DATA_DIR}/wc_{code}.png")
 
-    # 7. 生成全景时间轴数据 (Combined Timeline)
+    # 7. 生成全景时间轴数据
     if all_data_list:
         full_df = pd.concat(all_data_list)
-        # 按日期排序
         full_df = full_df.sort_values('date')
         full_df.to_csv(f"{DATA_DIR}/combined_timeline.csv", index=False)
-        print("✅ 全景时间轴数据已生成：combined_timeline.csv")
+        print("✅ 数据修复完成！请重新运行 streamlit run app.py")
 
 
 if __name__ == "__main__":
