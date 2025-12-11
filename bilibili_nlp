@@ -1,0 +1,158 @@
+import pandas as pd
+import numpy as np
+import os
+import re
+import datetime
+from snownlp import SnowNLP
+
+# ===========================
+# 1. 配置：严格的时间窗口
+# ===========================
+# 确保只保留属于该事件“黄金爆发期”的视频
+TIME_WINDOWS = {
+    '002242': ('2025-10-01', '2025-12-31'),  # 九阳 (当下，B站显示 M-D)
+    '601127': ('2023-08-01', '2024-01-31'),  # 赛力斯 (历史，B站显示 Y-M-D)
+    '01810': ('2024-02-01', '2024-05-31')  # 小米 (历史，B站显示 Y-M-D)
+}
+
+RAW_DIR = "./raw_data_lake"
+REAL_DIR = "./real_data"
+if not os.path.exists(REAL_DIR): os.makedirs(REAL_DIR)
+
+
+# ===========================
+# 2. 核心清洗工具
+# ===========================
+def clean_count(text):
+    """把 '103.5万' 转为 1035000"""
+    try:
+        text = str(text).strip()
+        if '万' in text:
+            return int(float(text.replace('万', '')) * 10000)
+        elif '亿' in text:
+            return int(float(text.replace('亿', '')) * 100000000)
+        else:
+            # 提取纯数字
+            nums = re.findall(r'\d+', text)
+            return int(nums[0]) if nums else 0
+    except:
+        return 0
+
+
+def clean_date(text):
+    """
+    【核心修复】智能日期解析
+    1. 2023-9-12 -> 2023-09-12
+    2. 9-12      -> 2025-09-12 (自动补全今年)
+    3. 昨天/几小时前 -> 推算具体日期
+    """
+    try:
+        text = str(text).strip()
+        now = datetime.datetime.now()
+        current_year = now.year  # 2025
+
+        # --- A. 相对时间处理 ---
+        if '昨天' in text:
+            d = now - datetime.timedelta(days=1)
+            return d.strftime('%Y-%m-%d')
+        elif '小时前' in text or '分钟前' in text or '刚' in text:
+            return now.strftime('%Y-%m-%d')
+        elif '天前' in text:
+            days = int(re.findall(r'\d+', text)[0])
+            d = now - datetime.timedelta(days=days)
+            return d.strftime('%Y-%m-%d')
+
+        # --- B. 绝对时间处理 ---
+        # 1. 优先检查是否包含年份 (4位数字)
+        # 匹配像 2023-9-12, 2024/3/5, 2023年5月
+        year_match = re.search(r'(20\d{2})', text)
+
+        if year_match:
+            # 有年份，直接解析
+            # 统一替换分隔符为 -
+            text = text.replace('年', '-').replace('月', '-').replace('日', '')
+            text = text.replace('/', '-')
+            return pd.to_datetime(text).strftime('%Y-%m-%d')
+
+        else:
+            # 2. 没有年份，只有月-日 (如 9-12, 11-21)
+            # 这种情况默认是【今年】
+            # 统一分隔符
+            text = text.replace('月', '-').replace('日', '')
+
+            # 确保格式是 M-D
+            if '-' in text:
+                return pd.to_datetime(f"{current_year}-{text}").strftime('%Y-%m-%d')
+
+        return None
+    except:
+        return None
+
+
+def get_sentiment(text):
+    try:
+        return SnowNLP(str(text)).sentiments
+    except:
+        return 0.5
+
+
+# ===========================
+# 3. 主处理逻辑
+# ===========================
+def main():
+    print("🚀 启动 Bilibili 数据清洗与 NLP 分析 (日期修复版)...")
+
+    for code, (start_dt, end_dt) in TIME_WINDOWS.items():
+        raw_path = f"{RAW_DIR}/bili_raw_{code}.csv"
+        if not os.path.exists(raw_path):
+            print(f"⚠️ 未找到原始文件: {raw_path}，请先运行 bilibili_crawl.py")
+            continue
+
+        print(f"\n🔨 处理 {code}...")
+        df = pd.read_csv(raw_path)
+        print(f"   - 原始数据: {len(df)} 条")
+
+        # 1. 清洗日期 (关键步骤)
+        df['date'] = df['raw_date'].apply(clean_date)
+        df['date'] = pd.to_datetime(df['date'], errors='coerce')
+
+        # 剔除无效日期
+        df = df.dropna(subset=['date'])
+
+        # 2. 时间窗口过滤
+        # 只保留处于“爆发期”内的视频
+        mask = (df['date'] >= pd.to_datetime(start_dt)) & (df['date'] <= pd.to_datetime(end_dt))
+        df_valid = df.loc[mask].copy()
+
+        print(f"   - 清洗后保留 ({start_dt}~{end_dt}): {len(df_valid)} 条")
+
+        if df_valid.empty:
+            print("   ⚠️ 该时间段无有效视频，可能是爬虫没抓到历史数据。")
+            continue
+
+        # 3. 清洗数值指标
+        df_valid['view_count'] = df_valid['raw_views'].apply(clean_count)
+        df_valid['danmaku_count'] = df_valid['raw_danmaku'].apply(clean_count)
+
+        # 4. 情感打分
+        df_valid['sentiment'] = df_valid['title'].apply(get_sentiment)
+
+        # 5. 计算 B站特有热度 (加权)
+        # 弹幕的权重比播放量高，因为代表深度互动
+        df_valid['bili_buzz'] = df_valid['view_count'] + df_valid['danmaku_count'] * 10
+
+        # 6. 按日聚合
+        daily = df_valid.groupby('date').agg({
+            'bili_buzz': 'sum',
+            'sentiment': 'mean',
+            'title': 'count'
+        }).rename(columns={'title': 'video_num'})
+
+        # 保存
+        save_path = f"{REAL_DIR}/bilibili_{code}.csv"
+        daily.to_csv(save_path)
+        print(f"✅ B站数据已就绪: {save_path}")
+
+
+if __name__ == "__main__":
+    main()
