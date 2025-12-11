@@ -9,91 +9,138 @@ plt.rcParams['font.sans-serif'] = ['SimHei']
 plt.rcParams['axes.unicode_minus'] = False
 DATA_DIR = "./real_data"
 
+# 股票清单
 STOCKS = {
-    '002242': {'name': '九阳股份', 'type': '噪音型'},
-    '601127': {'name': '赛力斯', 'type': '价值型'},
-    '603178': {'name': '圣龙股份', 'type': '博弈型'}
+    '002242': {'name': '九阳股份', 'type': 'noise'},
+    '601127': {'name': '赛力斯', 'type': 'value'},
+    '01810': {'name': '小米集团', 'type': 'value'}
 }
 
 
 def process_final():
-    print("🚀 启动数据清洗与全景整合引擎 (修复版)...")
-
-    all_data_list = []
+    print("🚀 启动跨平台舆情融合引擎 (Guba + Bilibili)...")
+    stats_list = []
 
     for code, info in STOCKS.items():
         name = info['name']
-        s_path = f"{DATA_DIR}/sentiment_{code}.csv"
-        m_path = f"{DATA_DIR}/market_{code}.csv"
 
-        if not os.path.exists(s_path) or not os.path.exists(m_path):
-            print(f"⚠️ 跳过 {name}")
+        # 1. 定义文件路径
+        guba_path = f"{DATA_DIR}/sentiment_{code}.csv"
+        bili_path = f"{DATA_DIR}/bilibili_{code}.csv"
+        market_path = f"{DATA_DIR}/market_{code}.csv"
+
+        # 检查市场数据 (必须有)
+        if not os.path.exists(market_path):
+            print(f"⚠️ 跳过 {name}: 缺股价数据")
             continue
 
-        # 1. 读取与清洗
-        df_s = pd.read_csv(s_path, index_col=0)
-        df_m = pd.read_csv(m_path, index_col=0)
-
-        df_s.index = pd.to_datetime(df_s.index, errors='coerce')
+        # 2. 读取各路数据
+        df_m = pd.read_csv(market_path, index_col=0)
         df_m.index = pd.to_datetime(df_m.index, errors='coerce')
-        df_s = df_s.dropna(how='all')
 
-        # 2. 合并
-        df = pd.merge(df_m, df_s, left_index=True, right_index=True, how='inner')
-        if len(df) < 5: continue
-
-        # 3. 统一因子计算
-        if code in ['601127', '603178']:
-            # 热门股用热度累积
-            raw = df['total_buzz'].cumsum()
+        # 读取股吧
+        if os.path.exists(guba_path):
+            df_guba = pd.read_csv(guba_path, index_col=0)
+            df_guba.index = pd.to_datetime(df_guba.index, errors='coerce')
+            df_guba = df_guba.rename(columns={'read_count': 'guba_buzz'})
+            # 确保列存在
+            if 'guba_buzz' in df_guba.columns:
+                df_guba = df_guba[['guba_buzz']]
+            else:
+                df_guba['guba_buzz'] = 0
         else:
-            # 九阳也用热度累积，放大一点数值以便观察
-            raw = df['total_buzz'].cumsum() * 2
+            df_guba = pd.DataFrame(columns=['guba_buzz'])
 
-        df['cum_factor'] = raw.bfill().fillna(0)
-
-        # 【关键修复】APP 需要读取 'meme_heat' 列，这里必须赋值
-        df['meme_heat'] = df['cum_factor']
-
-        # 4. 计算其他展示指标
-        # 背离度
-        df['divergence'] = df['cum_factor'] / (df['CAR'].abs() + 0.01)
-
-        # 归一化 (0-100分制，用于动态气泡图)
-        df['Heat_Score'] = (df['cum_factor'] - df['cum_factor'].min()) / (
-                    df['cum_factor'].max() - df['cum_factor'].min()) * 100
-        df['CAR_Score'] = df['CAR'] * 100
-
-        # 保存单文件
-        df.to_csv(f"{DATA_DIR}/final_{code}.csv")
-
-        # 5. 准备合并数据 (用于动态图)
-        df['Name'] = name
-        df['Type'] = info['type']
-        df['Date_Str'] = df.index.strftime('%Y-%m-%d')
-
-        df_reset = df.reset_index()
-        # 确保包含 app 需要的所有列
-        all_data_list.append(
-            df_reset[['date', 'Date_Str', 'Name', 'Type', 'Heat_Score', 'CAR_Score', 'total_buzz', 'meme_heat', 'CAR']])
-
-        # 6. 生成词云
-        wc = WordCloud(font_path="C:/Windows/Fonts/simhei.ttf", background_color="white", width=600, height=400)
-        if code == '601127':
-            words = {'遥遥领先': 100, '华为': 90, 'M7': 80, '大定': 60}
-        elif code == '603178':
-            words = {'龙字辈': 100, '涨停': 90, '圣龙': 80, '跨年妖': 70}
+        # 读取B站
+        if os.path.exists(bili_path):
+            df_bili = pd.read_csv(bili_path, index_col=0)
+            df_bili.index = pd.to_datetime(df_bili.index, errors='coerce')
+            if 'bili_buzz' in df_bili.columns:
+                df_bili = df_bili[['bili_buzz']]
+            else:
+                df_bili['bili_buzz'] = 0
         else:
-            words = {'哈基米': 100, '离谱': 50, '甚至': 40, '好玩': 30}
-        wc.generate_from_frequencies(words)
-        wc.to_file(f"{DATA_DIR}/wc_{code}.png")
+            df_bili = pd.DataFrame(columns=['bili_buzz'])
 
-    # 7. 生成全景时间轴数据
-    if all_data_list:
-        full_df = pd.concat(all_data_list)
-        full_df = full_df.sort_values('date')
-        full_df.to_csv(f"{DATA_DIR}/combined_timeline.csv", index=False)
-        print("✅ 数据修复完成！请重新运行 streamlit run app.py")
+        # 3. 跨平台数据融合 (Outer Join)
+        # 这一步把股吧和B站的时间轴并集，哪天没数据就填0
+        df_social = pd.merge(df_guba, df_bili, left_index=True, right_index=True, how='outer')
+        df_social = df_social.fillna(0)
+
+        # 4. 计算全网总热度
+        if 'guba_buzz' not in df_social.columns: df_social['guba_buzz'] = 0
+        if 'bili_buzz' not in df_social.columns: df_social['bili_buzz'] = 0
+
+        df_social['total_buzz'] = df_social['guba_buzz'] + df_social['bili_buzz']
+
+        print(f"\n🔨 处理 {name}: 股吧+B站 -> 融合后{len(df_social)}天")
+
+        # 5. 交易日对齐与递延 (Weekend Effect)
+        trade_days = df_m.index.sort_values()
+
+        def get_next_trade_day(d):
+            future_days = trade_days[trade_days >= d]
+            return future_days[0] if len(future_days) > 0 else pd.NaT
+
+        df_social['trade_date'] = df_social.index.to_series().apply(get_next_trade_day)
+        df_social = df_social.dropna(subset=['trade_date'])
+
+        # 按交易日聚合
+        df_social_agg = df_social.groupby('trade_date').agg({
+            'total_buzz': 'sum',
+            'guba_buzz': 'sum',
+            'bili_buzz': 'sum'
+        })
+
+        # 6. 与股价合并 【核心修复点】
+        # 这里之前写错了变量名，现在修正为 df_social_agg
+        df_final = pd.merge(df_m, df_social_agg, left_index=True, right_index=True, how='left')
+
+        df_final['total_buzz'] = df_final['total_buzz'].fillna(0)
+
+        # 7. 计算累积趋势因子 (Cumulative Trend)
+        df_final['cum_factor'] = df_final['total_buzz'].cumsum()
+
+        # 归一化 (0-100)，方便画图和APP展示，命名为 meme_heat
+        # 避免除以0
+        denom = df_final['cum_factor'].max() - df_final['cum_factor'].min()
+        if denom == 0: denom = 1
+
+        df_final['meme_heat'] = (df_final['cum_factor'] - df_final['cum_factor'].min()) / denom
+
+        # 8. 统计分析
+        valid_df = df_final.dropna(subset=['CAR', 'meme_heat'])
+
+        if len(valid_df) > 5:
+            corr, p = pearsonr(valid_df['meme_heat'], valid_df['CAR'])
+            print(f"   📊 融合后效果: R={corr:.4f} (P={p:.4e})")
+
+            # 保存最终宽表
+            df_final.to_csv(f"{DATA_DIR}/final_{code}.csv")
+
+            # 记录统计结果
+            total_buzz_sum = df_social['total_buzz'].sum() + 1
+            stats_list.append({
+                'code': code, 'name': name,
+                'r': corr, 'p': p,
+                'guba_ratio': df_social['guba_buzz'].sum() / total_buzz_sum,
+                'bili_ratio': df_social['bili_buzz'].sum() / total_buzz_sum
+            })
+
+            # 生成混合词云 (兜底)
+            wc_path = f"{DATA_DIR}/wc_{code}.png"
+            if not os.path.exists(wc_path):
+                wc = WordCloud(font_path="C:/Windows/Fonts/simhei.ttf", background_color="white", width=800, height=500)
+                wc.generate(name)
+                wc.to_file(wc_path)
+        else:
+            print("   ⚠️ 有效数据不足，无法回归")
+
+    # 保存统计表
+    if stats_list:
+        stat_df = pd.DataFrame(stats_list)
+        stat_df.to_csv(f"{DATA_DIR}/stats.csv", index=False)
+        print("\n✅ 全流程结束！统计结果已保存。")
 
 
 if __name__ == "__main__":
