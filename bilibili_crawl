@@ -1,0 +1,183 @@
+import pandas as pd
+import time
+import random
+import os
+from selenium import webdriver
+from selenium.webdriver.edge.service import Service as EdgeService
+from selenium.webdriver.chrome.service import Service as ChromeService
+from webdriver_manager.microsoft import EdgeChromiumDriverManager
+from webdriver_manager.chrome import ChromeDriverManager
+from selenium.webdriver.chrome.options import Options as ChromeOptions
+from selenium.webdriver.edge.options import Options as EdgeOptions
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from bs4 import BeautifulSoup
+
+# ===========================
+# 1. 任务配置
+# ===========================
+TASKS = {
+    # 九阳 (当下)
+    '002242': {'name': '九阳股份', 'keywords': ['哈基米 九阳', '哈基米 豆浆']},
+    # 赛力斯 (历史大梗)
+    '601127': {'name': '赛力斯', 'keywords': ['遥遥领先', '华为Mate60', '问界M7']},
+    # 小米 (历史大梗)
+    '01810': {'name': '小米集团', 'keywords': ['小米SU7', '雷神 雷军', '小米汽车']}
+}
+
+RAW_DIR = "./raw_data_lake"
+if not os.path.exists(RAW_DIR): os.makedirs(RAW_DIR)
+
+
+# ===========================
+# 2. 驱动配置 (强兼容性版)
+# ===========================
+def get_driver():
+    print("🚗 正在尝试启动浏览器驱动...")
+
+    # --- 尝试 1: Edge 浏览器 ---
+    try:
+        print("   -> 尝试启动 Edge...")
+        options = EdgeOptions()
+        options.add_argument('--disable-gpu')
+        options.add_experimental_option('excludeSwitches', ['enable-logging'])
+        # 【关键】B站反爬严，不使用 headless，必须弹出窗口
+        service = EdgeService(EdgeChromiumDriverManager().install())
+        driver = webdriver.Edge(service=service, options=options)
+        print("   ✅ Edge 启动成功！")
+        return driver
+    except Exception as e:
+        print(f"   ❌ Edge 启动失败: {e}")
+
+    # --- 尝试 2: Chrome 浏览器 ---
+    try:
+        print("   -> 尝试启动 Chrome...")
+        options = ChromeOptions()
+        options.add_argument('--disable-gpu')
+        options.add_experimental_option('excludeSwitches', ['enable-logging'])
+        service = ChromeService(ChromeDriverManager().install())
+        driver = webdriver.Chrome(service=service, options=options)
+        print("   ✅ Chrome 启动成功！")
+        return driver
+    except Exception as e:
+        print(f"   ❌ Chrome 启动失败: {e}")
+
+    print("🚫 所有浏览器启动失败，请检查是否安装了 Edge 或 Chrome。")
+    return None
+
+
+# ===========================
+# 3. 抓取逻辑
+# ===========================
+def crawl_keyword(driver, keyword):
+    print(f"\n   🔍 正在搜索: {keyword}")
+
+    # order=click 按点击量排序，挖掘历史爆款
+    url = f"https://search.bilibili.com/all?keyword={keyword}&order=click"
+
+    try:
+        driver.get(url)
+
+        # 智能等待：等待视频卡片加载出来 (最多等10秒)
+        # 如果B站弹出验证码，这里会等待，给你时间手动滑
+        print("      ⏳ 等待页面加载 (如有验证码请手动完成)...")
+        WebDriverWait(driver, 10).until(
+            EC.presence_of_element_located((By.CLASS_NAME, "bili-video-card"))
+        )
+    except:
+        print("      ⚠️ 页面加载超时，可能无内容或被拦截")
+        return []
+
+    data_list = []
+
+    # 抓取前 3 页 (B站精华都在前几页)
+    for page in range(1, 4):
+        # 滚动页面 (B站是懒加载，必须滚到底)
+        print(f"      正在读取第 {page} 页...")
+        for _ in range(3):
+            driver.execute_script("window.scrollBy(0, 1000);")
+            time.sleep(1)
+
+        soup = BeautifulSoup(driver.page_source, 'html.parser')
+
+        # 兼容新旧版B站类名
+        cards = soup.select('.bili-video-card')
+        if not cards: cards = soup.select('.video-item')
+
+        valid_count = 0
+        for card in cards:
+            try:
+                # 标题
+                title_tag = card.select_one('h3') or card.select_one('.headline')
+                title = title_tag.get_text(strip=True) if title_tag else ""
+
+                # 日期
+                date_tag = card.select_one('.bili-video-card__info--date') or card.select_one('.time')
+                date_str = date_tag.get_text(strip=True).replace('·', '').strip() if date_tag else ""
+
+                # 数据 (播放/弹幕)
+                stats = card.select('.bili-video-card__stats--item')
+                views_str = "0"
+                danmaku_str = "0"
+                if stats and len(stats) >= 1: views_str = stats[0].get_text(strip=True)
+                if stats and len(stats) >= 2: danmaku_str = stats[1].get_text(strip=True)
+
+                data_list.append({
+                    'raw_date': date_str,
+                    'title': title,
+                    'raw_views': views_str,
+                    'raw_danmaku': danmaku_str,
+                    'keyword': keyword
+                })
+                valid_count += 1
+            except:
+                continue
+
+        print(f"      -> 本页获取 {valid_count} 条")
+
+        # 翻页逻辑：点击下一页
+        try:
+            next_btns = driver.find_elements(By.XPATH,
+                                             "//button[contains(@class, 'vui_pagenation--btn-side') and contains(text(), '下一页')]")
+            if next_btns:
+                driver.execute_script("arguments[0].click();", next_btns[0])
+                time.sleep(3)
+            else:
+                break
+        except:
+            break
+
+    return data_list
+
+
+def main():
+    driver = get_driver()
+    if not driver: return
+
+    try:
+        for code, task in TASKS.items():
+            print(f"\n============================")
+            print(f"📺 任务启动: {task['name']}")
+            all_data = []
+
+            for kw in task['keywords']:
+                res = crawl_keyword(driver, kw)
+                all_data.extend(res)
+
+            if all_data:
+                df = pd.DataFrame(all_data)
+                df = df.drop_duplicates(subset=['title'])  # 去重
+                save_path = f"{RAW_DIR}/bili_raw_{code}.csv"
+                df.to_csv(save_path, index=False, encoding='utf-8-sig')
+                print(f"✅ {task['name']} 保存成功: {save_path} (共 {len(df)} 条)")
+            else:
+                print(f"⚠️ {task['name']} 未抓到数据")
+
+    finally:
+        print("\n🛑 爬虫结束，关闭浏览器...")
+        driver.quit()
+
+
+if __name__ == "__main__":
+    main()
